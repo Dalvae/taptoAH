@@ -12,6 +12,12 @@ Files already loaded (same realm + scan_time) are skipped.
 Each scan also updates current_auctions (for all items on a full scan, for the covered items on a partial
 one) and records auction_events: listings that are new, and listings that disappeared, as "expired" when
 they had run out of time since they were last seen and as "sold" otherwise (cancelled ones look sold).
+
+Unknown sellers: the client gives no seller name until it has looked that player up, so a fast scan reads
+some auctions with seller "?". fill_owners() names them when exactly one known seller has an auction with the
+same item, suffix, stack size, min bid and buyout, in this scan or on the AH before it (current_auctions);
+the names this scan does know also fill earlier scans' "?" auctions of the same key.
+  ingest.py --backfill   do that for the scans already loaded
 """
 import os
 import sys
@@ -70,7 +76,7 @@ def load_file(con, path):
                       (realm, scan_time, os.path.basename(path), int(meta["total"]), int(meta.get("unread", 0)),
                        mode, ",".join(map(str, sorted(covered))) if covered else None))
     scan_id = cur.lastrowid
-    auctions = [(scan_id,) + a[1:] for a in auctions]
+    auctions = fill_owners(con, realm, scan_id, [(scan_id,) + a[1:] for a in auctions])
     update_current(con, realm, scan_time, mode, covered, auctions)
     con.executemany("INSERT INTO auctions VALUES (?,?,?,?,?,?,?,?,?)", auctions)
     con.executemany("""INSERT INTO items VALUES (?,?,?,?,?) ON CONFLICT(item_id) DO UPDATE SET
@@ -79,6 +85,77 @@ def load_file(con, path):
     stats(con, scan_id)
     con.commit()
     return scan_id, len(auctions)
+
+
+UNKNOWN = "?"
+
+
+def owner_key(a):
+    """(item, suffix, count, min_bid, buyout) of an auctions-table tuple."""
+    return a[1], a[2], a[3], a[4], a[6]
+
+
+def fill_owners(con, realm, scan_id, auctions):
+    """Name the "?" sellers of `auctions` (see the module doc); returns the new list."""
+    names = {}
+    def see(k, owner):
+        if owner and owner != UNKNOWN:
+            names.setdefault(k, set()).add(owner)
+    for a in auctions:
+        see(owner_key(a), a[8])
+    known_here = {k: set(v) for k, v in names.items()}
+    for row in con.execute("SELECT item_id, suffix_id, count, min_bid, buyout, owner FROM current_auctions "
+                           "WHERE realm=?", (realm,)):
+        see(row[:5], row[5])
+    filled = 0
+    out = []
+    for a in auctions:
+        if a[8] in (None, UNKNOWN):
+            n = names.get(owner_key(a))
+            if n and len(n) == 1:
+                a = a[:8] + (next(iter(n)),)
+                filled += 1
+        out.append(a)
+    # this scan's names for earlier scans' unknown auctions of the realm
+    back = 0
+    for k, n in known_here.items():
+        if len(n) == 1:
+            back += con.execute(
+                "UPDATE auctions SET owner=? WHERE owner=? AND scan_id<>? AND item_id=? AND suffix_id=? AND count=? "
+                "AND min_bid=? AND buyout=? AND scan_id IN (SELECT scan_id FROM scans WHERE realm=?)",
+                (next(iter(n)), UNKNOWN, scan_id) + k + (realm,)).rowcount
+            # and in current_auctions, so update_current doesn't see "?" -> name as sold + new
+            con.execute("UPDATE current_auctions SET owner=? WHERE realm=? AND owner=? AND item_id=? AND suffix_id=? "
+                        "AND count=? AND min_bid=? AND buyout=?", (next(iter(n)), realm, UNKNOWN) + k)
+    unknown = sum(1 for a in out if a[8] in (None, UNKNOWN))
+    if filled or back or unknown:
+        print(f"sellers: {filled} unknown named from matching auctions, {back} in earlier scans; {unknown} still unknown")
+    return out
+
+
+def backfill(con):
+    """fill_owners() for every scan already loaded, oldest first (current_auctions is not rewound)."""
+    for scan_id, realm in con.execute("SELECT scan_id, realm FROM scans ORDER BY scan_time").fetchall():
+        rows = con.execute("SELECT rowid, * FROM auctions WHERE scan_id=?", (scan_id,)).fetchall()
+        new = fill_owners(con, realm, scan_id, [r[1:] for r in rows])
+        con.executemany("UPDATE auctions SET owner=? WHERE rowid=?",
+                        [(a[8], r[0]) for r, a in zip(rows, new) if a[8] != r[9]])
+    # current_auctions is a copy of the newest scans: take the names from them
+    con.execute("""UPDATE current_auctions SET owner = (
+                     SELECT MAX(a.owner) FROM auctions a JOIN scans s USING (scan_id)
+                     WHERE s.realm = current_auctions.realm AND s.scan_time = current_auctions.seen
+                       AND a.item_id = current_auctions.item_id AND a.suffix_id = current_auctions.suffix_id
+                       AND a.count = current_auctions.count AND a.min_bid = current_auctions.min_bid
+                       AND a.buyout = current_auctions.buyout AND a.owner <> ?
+                     HAVING COUNT(DISTINCT a.owner) = 1)
+                   WHERE owner = ? AND EXISTS (
+                     SELECT 1 FROM auctions a JOIN scans s USING (scan_id)
+                     WHERE s.realm = current_auctions.realm AND s.scan_time = current_auctions.seen
+                       AND a.item_id = current_auctions.item_id AND a.suffix_id = current_auctions.suffix_id
+                       AND a.count = current_auctions.count AND a.min_bid = current_auctions.min_bid
+                       AND a.buyout = current_auctions.buyout AND a.owner <> ?
+                     GROUP BY a.item_id HAVING COUNT(DISTINCT a.owner) = 1)""", (UNKNOWN, UNKNOWN, UNKNOWN))
+    con.commit()
 
 
 def update_current(con, realm, scan_time, mode, covered, auctions):
@@ -148,6 +225,9 @@ def stats(con, scan_id):
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if args == ["--backfill"]:
+        backfill(db.connect())
+        sys.exit(0)
     targets_dir = None
     if args[:1] == ["--targets"]:
         targets_dir, args = args[1], args[2:]

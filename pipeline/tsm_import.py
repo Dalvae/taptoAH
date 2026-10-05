@@ -3,6 +3,10 @@
 
   tsm_import.py <path/to/TradeSkillMaster_AuctionDB.lua> [...]
 
+Anyone's file can be imported (a friend's too: put it on the box under
+~/.local/share/wow-ah/incoming/<who>/<ACCOUNT>/SavedVariables/ and the pipeline picks it up); older data never
+replaces newer. TSM keeps prices only, no sellers.
+
 scanData is "?<item>,<a>,<marketValue>,<lastScan>,<d>,<minBuyout>,<scans>,<quantity>" repeated,
 numbers in base 64 (alphabet below), "~" = none. <scans> = "<day>:<v>" joined by "!", where <v> is a
 market value, "<avg>@<count>" or the day's raw values joined by ";".
@@ -60,8 +64,15 @@ def import_file(con, path):
             for day, value, count in day_values(scans):
                 if value:
                     rows.append((key, item, day, value, count))
-        con.executemany("INSERT OR REPLACE INTO tsm_daily VALUES (?,?,?,?,?)", rows)
-        con.executemany("INSERT OR REPLACE INTO tsm_latest VALUES (?,?,?,?,?,?)", latest)
+        # Files come from several players (ours, friends'): a day keeps the value averaged over the most
+        # scans, an item's latest values come from the newest scan.
+        con.executemany("""INSERT INTO tsm_daily VALUES (?,?,?,?,?) ON CONFLICT (realm, item_id, day) DO UPDATE
+                           SET market_value = excluded.market_value, scans = excluded.scans
+                           WHERE COALESCE(excluded.scans, 1) >= COALESCE(tsm_daily.scans, 1)""", rows)
+        con.executemany("""INSERT INTO tsm_latest VALUES (?,?,?,?,?,?) ON CONFLICT (realm, item_id) DO UPDATE
+                           SET last_scan = excluded.last_scan, market_value = excluded.market_value,
+                               min_buyout = excluded.min_buyout, quantity = excluded.quantity
+                           WHERE COALESCE(excluded.last_scan, 0) >= COALESCE(tsm_latest.last_scan, 0)""", latest)
         print(f"{path}: {key}: {len(rows)} item-days")
         total += len(rows)
     con.commit()
