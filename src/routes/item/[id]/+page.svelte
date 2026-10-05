@@ -7,12 +7,15 @@
 		getLatest,
 		getHistory,
 		getAuctions,
+		getEvents,
 		itemName,
 		realmLabel,
 		type Item,
 		type Latest,
 		type HistoryPoint,
-		type Auction
+		type Auction,
+		type AuctionEvent,
+		type EventKind
 	} from '#lib/data.ts';
 	import { currentRealm, withRealm } from '#lib/realm.svelte.ts';
 	import {
@@ -39,6 +42,8 @@
 	let latest = $state<Latest | null>(null);
 	let history = $state<HistoryPoint[] | null>(null);
 	let auctions = $state<Auction[] | null>(null);
+	/** undefined = loading, null = events.parquet not published */
+	let events = $state<AuctionEvent[] | null | undefined>(undefined);
 	let loading = $state(true);
 	let error = $state('');
 
@@ -53,6 +58,7 @@
 		latest = null;
 		history = null;
 		auctions = null;
+		events = undefined;
 		const fail = (e: unknown) => {
 			if (!cancelled) error = e instanceof Error ? e.message : String(e);
 		};
@@ -72,6 +78,12 @@
 		getAuctions(r, id)
 			.then((a) => !cancelled && (auctions = a))
 			.catch(fail);
+		getEvents(r, id)
+			.then((ev) => !cancelled && (events = ev))
+			.catch((e) => {
+				fail(e);
+				if (!cancelled) events = null;
+			});
 		return () => (cancelled = true);
 	});
 
@@ -154,6 +166,38 @@
 			bins[idx].qty += a.count;
 		}
 		return { qty, bins, maxQty: Math.max(...bins.map((b) => b.qty)), lo, hi };
+	});
+
+	// ---- sales (listings that appeared / disappeared between scans) ------------------------------
+	const KINDS: { kind: EventKind; label: string; cls: string }[] = [
+		{ kind: 'new', label: 'Listed', cls: 'text-accent-2' },
+		{ kind: 'sold', label: 'Sold', cls: 'text-up' },
+		{ kind: 'expired', label: 'Expired', cls: 'text-muted' }
+	];
+	const sales = $derived.by(() => {
+		if (!events) return null;
+		const now = Date.now() / 1000;
+		const win = (secs: number) => {
+			const c: Record<EventKind, number> = { new: 0, sold: 0, expired: 0 };
+			let soldCopper = 0;
+			let soldUnits = 0;
+			for (const e of events!) {
+				if (e.time <= now - secs) break; // newest first
+				if (!(e.kind in c)) continue;
+				c[e.kind]++;
+				if (e.kind === 'sold' && e.buyout && e.buyout > 0) {
+					soldCopper += e.buyout;
+					soldUnits += e.count;
+				}
+			}
+			const done = c.sold + c.expired;
+			return {
+				counts: c,
+				sellThrough: done ? (c.sold / done) * 100 : null,
+				avgSold: soldUnits ? soldCopper / soldUnits : null
+			};
+		};
+		return { d1: win(86400), d7: win(7 * 86400) };
 	});
 
 	const hasOwner = $derived(!!auctions?.some((a) => a.owner));
@@ -406,6 +450,74 @@
 						</tbody>
 					</table>
 				</div>
+			{/if}
+		</section>
+
+		<section class="panel p-4">
+			<h2 class="mb-2 font-semibold">Sales</h2>
+			{#if events === undefined}
+				<div class="skeleton h-32 w-full"></div>
+			{:else if events === null}
+				<p class="py-4 text-center text-sm text-muted">Sales data is not available yet.</p>
+			{:else if events.length === 0 || !sales}
+				<p class="py-4 text-center text-sm text-muted">
+					No listings of this item appeared or disappeared in the last 90 days.
+				</p>
+			{:else}
+				<table class="grid-table mb-3">
+					<thead>
+						<tr><th></th><th class="r">24h</th><th class="r">7d</th></tr>
+					</thead>
+					<tbody>
+						{#each KINDS as k (k.kind)}
+							<tr>
+								<td class={k.cls}>{k.label}</td>
+								<td class="r num">{fmtInt(sales.d1.counts[k.kind])}</td>
+								<td class="r num">{fmtInt(sales.d7.counts[k.kind])}</td>
+							</tr>
+						{/each}
+						<tr>
+							<td title="Sold / (sold + expired)">Sell-through</td>
+							<td class="r num">{sales.d1.sellThrough == null ? '—' : `${sales.d1.sellThrough.toFixed(0)}%`}</td>
+							<td class="r num">{sales.d7.sellThrough == null ? '—' : `${sales.d7.sellThrough.toFixed(0)}%`}</td>
+						</tr>
+						<tr>
+							<td>Avg sold / unit</td>
+							<td class="r"><Money value={sales.d1.avgSold} /></td>
+							<td class="r"><Money value={sales.d7.avgSold} /></td>
+						</tr>
+					</tbody>
+				</table>
+				<h3 class="label mb-1">Latest events</h3>
+				<div class="max-h-[360px] overflow-auto">
+					<table class="grid-table">
+						<thead>
+							<tr>
+								<th>When</th>
+								<th></th>
+								<th>Seller</th>
+								<th class="r">Qty</th>
+								<th class="r">Unit</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each events.slice(0, 50) as e, i (i)}
+								{@const k = KINDS.find((x) => x.kind === e.kind)}
+								<tr>
+									<td class="text-muted" title={absTime(e.time)}>{relativeTime(e.time)}</td>
+									<td class={k?.cls ?? ''}>{k?.label ?? e.kind}</td>
+									<td class="max-w-[7rem] truncate text-muted" title={e.owner ?? ''}>{e.owner ?? '—'}</td>
+									<td class="r num">{e.count}</td>
+									<td class="r"><Money value={e.buyout && e.count ? e.buyout / e.count : null} /></td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+				<p class="mt-2 text-xs text-dim">
+					From listings that appeared or disappeared between scans. A listing that disappears before it
+					expires counts as sold, which also covers cancelled ones, so sell-through is an upper bound.
+				</p>
 			{/if}
 		</section>
 	</aside>

@@ -59,6 +59,42 @@ export interface Auction {
 	time_left: number | null;
 	/** Seller name; nullable (TSM-derived rows have none) and the column may be absent. */
 	owner: string | null;
+	/** Unix time of the scan that saw this listing (absent in older files). */
+	seen: number | null;
+}
+
+export type EventKind = 'new' | 'sold' | 'expired';
+
+/** A listing that appeared ('new') or disappeared ('sold', which also covers cancelled, or 'expired'). */
+export interface AuctionEvent {
+	time: number;
+	kind: EventKind;
+	suffix_id: number | null;
+	count: number;
+	buyout: number | null;
+	owner: string | null;
+}
+
+/** A current auction that a vendor would pay more for than it costs. */
+export type VendorFlip = Auction &
+	Pick<Item, 'item_id' | 'name' | 'quality' | 'icon'> & {
+		sell_price: number;
+		/** What a vendor pays for the whole stack. */
+		vendor: number;
+		/** Price we would pay: buyout, or the next valid bid for bid flips. */
+		cost: number;
+		profit: number;
+		roi: number;
+		search: string;
+	};
+
+export interface VendorFlips {
+	/** Auctions on the AH for this realm (0 = no auction-level data yet). */
+	total: number;
+	/** Buyout below vendor value. */
+	flips: VendorFlip[];
+	/** No profitable buyout, but the next bid is below vendor value (only pays off if the bid wins). */
+	bids: VendorFlip[];
 }
 
 export function itemName(i: { item_id: number; name: string | null }): string {
@@ -192,6 +228,35 @@ export async function getHistory(realm: string, id: number): Promise<HistoryPoin
 	);
 }
 
+const fileChecks = new Map<string, Promise<boolean>>();
+
+/** Optional files (events.parquet may not be published yet): one HEAD request, false on 404 or network error. */
+function hasFile(name: string): Promise<boolean> {
+	let p = fileChecks.get(name);
+	if (!p) {
+		p = version()
+			.then((v) => fetch(dataFileUrl(name, v), { method: 'HEAD' }))
+			.then(
+				(r) => r.ok,
+				() => false
+			);
+		fileChecks.set(name, p);
+	}
+	return p;
+}
+
+function memo<T>(cache: Map<string, Promise<T>>, key: string, fn: () => Promise<T>): Promise<T> {
+	let p = cache.get(key);
+	if (!p) {
+		p = fn().catch((e) => {
+			cache.delete(key);
+			throw e;
+		});
+		cache.set(key, p);
+	}
+	return p;
+}
+
 export async function getAuctions(realm: string, id: number): Promise<Auction[]> {
 	const f = await file('auctions.parquet');
 	// SELECT * keeps this working whether or not the optional "owner" column is present.
@@ -209,8 +274,105 @@ export async function getAuctions(realm: string, id: number): Promise<Auction[]>
 		buyout: r.buyout ?? null,
 		unit_buyout: r.unit_buyout ?? null,
 		time_left: r.time_left ?? null,
-		owner: r.owner ?? null
+		owner: r.owner ?? null,
+		seen: r.seen ?? null
 	}));
+}
+
+/** Minimum next bid: the server wants at least 5% (min 1c) over the current bid. */
+export function nextBid(bid: number): number {
+	return bid + Math.max(1, Math.floor(bid * 0.05));
+}
+
+const vendorCache = new Map<string, Promise<VendorFlips>>();
+
+/** Every current auction whose buyout (or next bid) is below what a vendor pays for the stack. Cached per realm. */
+export function getVendorFlips(realm: string): Promise<VendorFlips> {
+	return memo(vendorCache, realm, async () => {
+		await ensureBaseTables();
+		if (!(await hasFile('auctions.parquet'))) return { total: 0, flips: [], bids: [] };
+		const f = await file('auctions.parquet');
+		const [{ n }] = await query<{ n: number }>(
+			`SELECT count(*) AS n FROM read_parquet('${f}') WHERE realm = ?`,
+			[realm]
+		);
+		if (!n) return { total: 0, flips: [], bids: [] };
+		// a.* keeps this working with older files that lack "owner" / "seen".
+		const rows = await query<Partial<Auction> & Pick<Item, 'item_id' | 'name' | 'quality' | 'icon'> & { sell_price: number }>(
+			`SELECT a.* EXCLUDE (realm), i.name, i.quality, i.icon, i.sell_price
+			   FROM read_parquet('${f}') a JOIN items i USING (item_id)
+			  WHERE a.realm = ? AND i.sell_price > 0
+			    AND ((a.buyout > 0 AND a.buyout < i.sell_price * a.count)
+			      OR (a.bid > 0 AND a.bid < i.sell_price * a.count))`,
+			[realm]
+		);
+		const flips: VendorFlip[] = [];
+		const bids: VendorFlip[] = [];
+		for (const r of rows) {
+			const count = r.count ?? 1;
+			const vendor = r.sell_price * count;
+			const buyout = r.buyout ?? 0;
+			const isFlip = buyout > 0 && buyout < vendor;
+			const cost = isFlip ? buyout : r.bid ? nextBid(r.bid) : 0;
+			if (!cost || cost >= vendor) continue;
+			const flip: VendorFlip = {
+				item_id: r.item_id,
+				name: r.name,
+				quality: r.quality,
+				icon: r.icon,
+				sell_price: r.sell_price,
+				suffix_id: r.suffix_id ?? null,
+				count,
+				bid: r.bid ?? null,
+				buyout: r.buyout ?? null,
+				unit_buyout: r.unit_buyout ?? null,
+				time_left: r.time_left ?? null,
+				owner: r.owner ?? null,
+				seen: r.seen ?? null,
+				vendor,
+				cost,
+				profit: vendor - cost,
+				roi: ((vendor - cost) / cost) * 100,
+				search: (r.name ?? `item #${r.item_id}`).toLowerCase()
+			};
+			(isFlip ? flips : bids).push(flip);
+		}
+		return { total: n, flips, bids };
+	});
+}
+
+/** Appear/disappear events for one item, newest first; null when events.parquet is not published. */
+export async function getEvents(realm: string, id: number): Promise<AuctionEvent[] | null> {
+	if (!(await hasFile('events.parquet'))) return null;
+	const f = await file('events.parquet');
+	return query<AuctionEvent>(
+		`SELECT time, kind, suffix_id, count, buyout, owner
+		   FROM read_parquet('${f}')
+		  WHERE realm = ? AND item_id = ?
+		  ORDER BY time DESC`,
+		[realm, id]
+	);
+}
+
+const soldCache = new Map<string, Promise<Map<number, number>>>();
+
+/** Units sold (or cancelled) per item in the last 24 hours. Empty when there are no events. Cached per realm. */
+export function getSold24h(realm: string): Promise<Map<number, number>> {
+	return memo(soldCache, realm, async () => {
+		const out = new Map<number, number>();
+		if (!(await hasFile('events.parquet'))) return out;
+		const f = await file('events.parquet');
+		const since = Math.floor(Date.now() / 1000) - 86400;
+		const rows = await query<{ item_id: number; units: number }>(
+			`SELECT item_id, CAST(sum(count) AS INTEGER) AS units
+			   FROM read_parquet('${f}')
+			  WHERE realm = ? AND kind = 'sold' AND time > ?
+			  GROUP BY item_id`,
+			[realm, since]
+		);
+		for (const r of rows) out.set(r.item_id, r.units);
+		return out;
+	});
 }
 
 export interface IndexEntry {

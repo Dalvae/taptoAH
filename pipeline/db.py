@@ -1,7 +1,9 @@
 """Price database (SQLite). One file per box: AH_DB (default ~/.local/share/wow-ah/ah.db).
 
 Tables
-  scans       one row per full scan loaded from an auction dump file
+  scans       one row per scan loaded from an auction dump file (mode full = whole AH, partial = some items)
+  current_auctions  what is on the AH now: the newest scan that covered each item
+  auction_events    listings that appeared (new) or disappeared (sold / expired) between scans
   auctions    every auction seen in a scan (unit prices are buyout / count)
   item_stats  per scan and item: quantity, min and percentile unit buyouts, market value
   items       item names, quality and icon as seen in scans
@@ -25,6 +27,18 @@ CREATE TABLE IF NOT EXISTS scans (
   unread      INTEGER NOT NULL,      -- auctions the scanner could not read
   UNIQUE (realm, scan_time)
 );
+CREATE TABLE IF NOT EXISTS current_auctions (
+  realm TEXT NOT NULL, item_id INTEGER NOT NULL, suffix_id INTEGER NOT NULL, count INTEGER NOT NULL,
+  min_bid INTEGER NOT NULL, bid INTEGER NOT NULL, buyout INTEGER NOT NULL, time_left INTEGER NOT NULL,
+  owner TEXT, seen INTEGER NOT NULL      -- scan_time of the scan that saw it
+);
+CREATE INDEX IF NOT EXISTS current_item ON current_auctions (realm, item_id);
+CREATE TABLE IF NOT EXISTS auction_events (
+  realm TEXT NOT NULL, item_id INTEGER NOT NULL, time INTEGER NOT NULL,
+  kind TEXT NOT NULL,                    -- new | sold | expired (sold also covers cancelled auctions)
+  suffix_id INTEGER, count INTEGER, buyout INTEGER, owner TEXT
+);
+CREATE INDEX IF NOT EXISTS events_item ON auction_events (realm, item_id, time);
 CREATE TABLE IF NOT EXISTS auctions (
   scan_id     INTEGER NOT NULL REFERENCES scans,
   item_id     INTEGER NOT NULL,
@@ -97,4 +111,8 @@ def connect(path=DEFAULT_PATH):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     con = sqlite3.connect(path)
     con.executescript(SCHEMA)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(scans)")}
+    if "mode" not in cols:   # databases from before partial scans
+        con.execute("ALTER TABLE scans ADD COLUMN mode TEXT NOT NULL DEFAULT 'full'")
+        con.execute("ALTER TABLE scans ADD COLUMN covered TEXT")
     return con

@@ -66,7 +66,8 @@ if [ ${#new[@]} -gt 0 ]; then
   "${PY[@]}" tsm_import.py "${sorted[@]}"
 fi
 if [ ${#dumps[@]} -gt 0 ]; then
-  "${PY[@]}" ingest.py "${dumps[@]}"
+  # targets_<realm>.txt for the next partial scan go where the scanner reads them
+  "${PY[@]}" ingest.py ${SCANS_SRC:+--targets "$SCANS_SRC"} "${dumps[@]}"
   mkdir -p "$DATA/scans/done"
   for f in "${dumps[@]}"; do gzip -c "$f" > "$DATA/scans/done/$(basename "$f").gz" && rm "$f"; done
 fi
@@ -80,7 +81,7 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
   CLOUDFLARE_API_TOKEN=$(python3 "$HERE/cf_token.py") || { echo "no Cloudflare credentials: skipping upload"; exit 1; }
   export CLOUDFLARE_API_TOKEN
 fi
-for f in items history latest auctions; do
+for f in items history latest auctions events; do
   npx --yes wrangler r2 object put "$BUCKET/$f.parquet" --file "$DATA/public/$f.parquet" --remote \
     --content-type application/octet-stream --cache-control "public, max-age=300" 2>&1 | grep -E "Upload complete|ERROR"
 done

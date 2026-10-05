@@ -14,10 +14,16 @@ mascot and visual identity.
   in the URL, so you can share a link to any view.
 - **Item** (`/item/<id>`): header, stat tiles, a price/quantity chart (7d/30d/90d/all, with
   optional outlier clipping), a weekday heatmap, the current listings with a price
-  histogram, and a link to Wowhead.
+  histogram (with sellers), a Sales card (listed / sold / expired over 24h and 7d,
+  sell-through, average sold price, latest events), and a link to Wowhead.
 - **Movers & Deals** (`/movers`): biggest risers and fallers (market value vs the 14-day
   average, with minimum quantity and minimum value thresholds), listings under X% of market
-  value, and listings below vendor price.
+  value, and listings below vendor price (single auctions when `auctions.parquet` has rows,
+  otherwise `latest.min_buyout`).
+- **Vendor flips** (`/vendor`): every current auction whose buyout is below what a vendor
+  pays for the stack, with seller, profit, ROI and time left. Filters (min profit, min ROI,
+  max buyout, text) live in the URL. Bid-only chances are listed separately. It is only a
+  list: nothing is bought automatically.
 - **Header**: instant item autocomplete and a realm/faction picker that shows data
   freshness. The chosen realm is kept in `?realm=` and in localStorage.
 
@@ -57,7 +63,7 @@ directory, or `LOCAL_DATA_DIR=off` to skip it.
 To test the production endpoint locally, load the files into wrangler's local R2:
 
 ```sh
-for f in meta.json items.parquet latest.parquet history.parquet auctions.parquet; do
+for f in meta.json items.parquet latest.parquet history.parquet auctions.parquet events.parquet; do
   npx wrangler r2 object put taptoah-data/$f --file data/$f --local --persist-to .wrangler/state
 done
 pnpm build && npx wrangler pages dev --persist-to .wrangler/state
@@ -77,7 +83,8 @@ build time. See `.env.example`.
 ## Data contract
 
 All money values are in **copper**. All times are unix seconds (UTC), and `day = unix // 86400`.
-Realm keys look like `Frostmourne_Alliance` (realm and faction joined by the last `_`).
+Realm keys are either a realm (`Frostmourne`, cross-faction AH) or realm and faction joined by
+the last `_` (`Frostmourne_Alliance`).
 
 | File | Columns | Notes |
 |---|---|---|
@@ -85,13 +92,17 @@ Realm keys look like `Frostmourne_Alliance` (realm and faction joined by the las
 | `items.parquet` | `item_id, name, quality, class, subclass, item_level, required_level, inventory_type, sell_price, stackable, icon` | `name`/`class` can be NULL for server-custom items (shown as "Item #id"). `icon` can be NULL. |
 | `latest.parquet` | `realm, item_id, seen, market_value, min_buyout, quantity, auctions, mv_3d, mv_14d, source` | One row per realm and item. |
 | `history.parquet` | `realm, item_id, day, market_value, min_buyout, quantity, scans, source` | `source='tsm'` is the imported TSM daily market value (no min_buyout/quantity). `'scan'` is our own scans and wins when both exist for the same day. |
-| `auctions.parquet` | `realm, item_id, suffix_id, count, bid, buyout, unit_buyout, time_left, owner?` | Every auction in the newest scan. It can be empty. `time_left` is 1 short, 2 medium, 3 long, 4 very long. `owner` is nullable and optional; the Seller column only appears when names exist. |
+| `auctions.parquet` | `realm, item_id, suffix_id, count, bid, buyout, unit_buyout, time_left, owner?, seen?` | What is on the AH now: per item, the auctions of the newest scan that covered it. It can be empty. `time_left` is 1 short, 2 medium, 3 long, 4 very long. `owner` (seller) and `seen` (scan time) are nullable and optional. |
+| `events.parquet` | `realm, item_id, time, kind, suffix_id, count, buyout, owner` | Optional (a 404 is treated as "no data"). Listings that appeared (`new`) or disappeared (`sold`, which also covers cancelled, or `expired`) between scans, last 90 days. Sorted by `realm, item_id, time`. |
 
 **Query strategy.** `items` and `latest` are small, so they are loaded once into in-memory
 DuckDB tables. The Browse and Movers pages filter and sort the joined rows in JS, which is
-instant for tens of thousands of rows. `history` and `auctions` are never loaded whole.
+instant for tens of thousands of rows. `history`, `auctions` and `events` are never loaded whole.
 They are queried with `WHERE realm = ? AND item_id = ?` straight from the remote file, so
-DuckDB only fetches the footer and the row groups it needs. To keep that fast as history
+DuckDB only fetches the footer and the row groups it needs. Two realm-wide queries are the
+exception: Vendor flips (and the Movers vendor table) read all of a realm's auctions joined
+with `items`, and Browse's "Sold 24h" column runs one `GROUP BY item_id` over the `sold`
+events (only the columns it needs). To keep that fast as history
 grows to millions of rows, **write `history.parquet` (and `auctions.parquet`) sorted by
 `realm, item_id, day`** with moderate row groups (e.g. `ROW_GROUP_SIZE 100000`), so
 min/max statistics prune almost every row group:

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import { getRealmRows, type Row } from '#lib/data.ts';
+	import { getRealmRows, getSold24h, type Row } from '#lib/data.ts';
 	import { currentRealm, withRealm } from '#lib/realm.svelte.ts';
 	import { QUALITIES, className, subclassName } from '#lib/wow.ts';
 	import { fmtInt, relativeTime, absTime } from '#lib/format.ts';
@@ -13,6 +13,8 @@
 	const realm = $derived(currentRealm());
 	let rows = $state<Row[] | null>(null);
 	let error = $state('');
+	/** Units sold per item in the last 24h (from events.parquet); empty until there are events. */
+	let sold = $state<Map<number, number>>(new Map());
 
 	$effect(() => {
 		const r = realm;
@@ -20,6 +22,11 @@
 		let cancelled = false;
 		rows = null;
 		error = '';
+		sold = new Map();
+		// optional column: a failure here just leaves it hidden
+		getSold24h(r)
+			.then((m) => !cancelled && (sold = m))
+			.catch(() => {});
 		getRealmRows(r)
 			.then((data) => {
 				if (!cancelled) rows = data;
@@ -43,7 +50,8 @@
 		| 'mv_14d'
 		| 'change'
 		| 'sell_price'
-		| 'seen';
+		| 'seen'
+		| 'sold_24h';
 
 	const SORT_KEYS: SortKey[] = [
 		'name',
@@ -57,7 +65,8 @@
 		'mv_14d',
 		'change',
 		'sell_price',
-		'seen'
+		'seen',
+		'sold_24h'
 	];
 	const PAGE_SIZES = [25, 50, 100, 200];
 
@@ -213,6 +222,8 @@
 				return r.class == null
 					? null
 					: `${className(r.class)} ${subclassName(r.class, r.subclass)}`;
+			case 'sold_24h':
+				return sold.get(r.item_id) ?? null;
 			default:
 				return r[key] as number | null;
 		}
@@ -241,7 +252,7 @@
 	let moreFilters = $state(false);
 
 	type Col = { key: SortKey; label: string; right?: boolean; cls?: string; title?: string };
-	const cols: Col[] = [
+	const allCols: Col[] = [
 		{ key: 'name', label: 'Item' },
 		{ key: 'class', label: 'Category', cls: 'hidden 2xl:table-cell' },
 		{ key: 'item_level', label: 'iLvl', right: true, cls: 'hidden md:table-cell' },
@@ -264,9 +275,19 @@
 			cls: 'hidden md:table-cell',
 			title: 'Market value vs 14-day average'
 		},
+		{
+			key: 'sold_24h',
+			label: 'Sold 24h',
+			right: true,
+			cls: 'hidden xl:table-cell',
+			title: 'Units sold (or cancelled) in the last 24 hours'
+		},
 		{ key: 'sell_price', label: 'Vendor', right: true, cls: 'hidden 2xl:table-cell' },
 		{ key: 'seen', label: 'Seen', right: true, cls: 'hidden 2xl:table-cell' }
 	];
+
+	const showSold = $derived(sold.size > 0);
+	const cols = $derived(showSold ? allCols : allCols.filter((c) => c.key !== 'sold_24h'));
 
 	function rangeInput(key: string, e: Event) {
 		const v = (e.currentTarget as HTMLInputElement).value;
@@ -548,6 +569,9 @@
 									<td class="r hidden xl:table-cell"><Money value={r.mv_3d} /></td>
 									<td class="r hidden lg:table-cell"><Money value={r.mv_14d} /></td>
 									<td class="r hidden md:table-cell"><Pct value={r.change} /></td>
+									{#if showSold}<td class="r num hidden text-muted xl:table-cell"
+											>{fmtInt(sold.get(r.item_id) ?? null)}</td
+										>{/if}
 									<td class="r hidden 2xl:table-cell"><Money value={r.sell_price || null} /></td>
 									<td class="r hidden text-muted 2xl:table-cell" title={absTime(r.seen)}
 										>{relativeTime(r.seen)}</td

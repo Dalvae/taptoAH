@@ -23,7 +23,8 @@
 
 	const nav = [
 		{ href: '/', label: 'Browse' },
-		{ href: '/movers', label: 'Movers & Deals' }
+		{ href: '/movers', label: 'Movers & Deals' },
+		{ href: '/vendor', label: 'Vendor flips' }
 	];
 	function isActive(href: string) {
 		return href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href);

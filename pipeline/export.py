@@ -10,8 +10,11 @@
                     one row per item and day; source 'scan' (our scans) wins over 'tsm'
   latest.parquet    realm, item_id, seen, market_value, min_buyout, quantity, auctions,
                     mv_3d, mv_14d (averages of daily market value), source
-  auctions.parquet  realm, item_id, suffix_id, count, bid, buyout, unit_buyout, time_left, owner
-                    every auction of the newest scan per realm (owner = seller, published on purpose)
+  auctions.parquet  realm, item_id, suffix_id, count, bid, buyout, unit_buyout, time_left, owner, seen
+                    what is on the AH now: for each item, the auctions of the newest scan that covered it
+                    (owner = seller, published on purpose)
+  events.parquet    realm, item_id, time, kind (new | sold | expired), suffix_id, count, buyout, owner
+                    listings that appeared or disappeared between scans, last 90 days
   meta.json         generated_at, per realm: last scan time, auctions, items
 All money in copper, times unix seconds UTC, day = unix // 86400.
 """
@@ -55,7 +58,9 @@ COLUMNS = {
                ("auctions", pa.int32()), ("mv_3d", pa.int64()), ("mv_14d", pa.int64()), ("source", pa.string())],
     "auctions": [("realm", pa.string()), ("item_id", pa.int32()), ("suffix_id", pa.int32()), ("count", pa.int16()),
                  ("bid", pa.int64()), ("buyout", pa.int64()), ("unit_buyout", pa.int64()),
-                 ("time_left", pa.int8()), ("owner", pa.string())],
+                 ("time_left", pa.int8()), ("owner", pa.string()), ("seen", pa.int64())],
+    "events": [("realm", pa.string()), ("item_id", pa.int32()), ("time", pa.int64()), ("kind", pa.string()),
+               ("suffix_id", pa.int32()), ("count", pa.int16()), ("buyout", pa.int64()), ("owner", pa.string())],
 }
 
 
@@ -96,11 +101,14 @@ def main(out):
     write(con, out, "latest", latest_sql, [("realm", "ascending"), ("item_id", "ascending")])
 
     write(con, out, "auctions", """
-      SELECT s.realm, a.item_id, a.suffix_id, a.count, a.bid, a.buyout,
-             CASE WHEN a.buyout > 0 THEN a.buyout / a.count END, a.time_left, a.owner
-      FROM auctions a JOIN scans s USING (scan_id)
-      WHERE a.scan_id IN (SELECT MAX(scan_id) FROM scans GROUP BY realm)""",
+      SELECT realm, item_id, suffix_id, count, bid, buyout,
+             CASE WHEN buyout > 0 THEN buyout / count END, time_left, owner, seen
+      FROM current_auctions""",
           [("realm", "ascending"), ("item_id", "ascending"), ("unit_buyout", "ascending")])
+    write(con, out, "events", f"""
+      SELECT realm, item_id, time, kind, suffix_id, count, buyout, owner FROM auction_events
+      WHERE time > {int(time.time()) - 90 * 86400}""",
+          [("realm", "ascending"), ("item_id", "ascending"), ("time", "ascending")])
 
     write(con, out, "items", """
       WITH seen AS (SELECT item_id FROM history UNION SELECT item_id FROM latest_ids)

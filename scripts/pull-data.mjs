@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Download the published data files into ./data for local development (served at /data by vite.config.ts).
 // Usage: pnpm data:pull <baseUrl>   (or DATA_SOURCE_URL=...; default: the production site's /data)
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -25,14 +25,17 @@ if (!base) {
 	process.exit(1);
 }
 console.log(`<- ${base}`);
-const files = ['meta.json', 'items.parquet', 'latest.parquet', 'history.parquet', 'auctions.parquet'];
+const files = ['meta.json', 'items.parquet', 'latest.parquet', 'history.parquet', 'auctions.parquet', 'events.parquet'];
+// Not published yet everywhere; the site treats a missing file as "no data".
+const optional = new Set(['events.parquet']);
 const out = join(root, 'data');
 mkdirSync(out, { recursive: true });
 for (const f of files) {
 	const res = await fetch(`${base}/${f}`);
 	if (!res.ok) {
-		console.error(`${f}: HTTP ${res.status}`);
-		process.exitCode = 1;
+		console.error(`${f}: HTTP ${res.status}${optional.has(f) ? ' (optional, skipped)' : ''}`);
+		if (optional.has(f)) rmSync(join(out, f), { force: true });
+		else process.exitCode = 1;
 		continue;
 	}
 	const buf = Buffer.from(await res.arrayBuffer());

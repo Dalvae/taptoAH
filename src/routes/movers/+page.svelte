@@ -5,8 +5,9 @@
 	import TrendingDown from '@lucide/svelte/icons/trending-down';
 	import Tag from '@lucide/svelte/icons/tag';
 	import Coins from '@lucide/svelte/icons/coins';
-	import { getRealmRows, type Row } from '#lib/data.ts';
-	import { currentRealm } from '#lib/realm.svelte.ts';
+	import ArrowRight from '@lucide/svelte/icons/arrow-right';
+	import { getRealmRows, getVendorFlips, type Row, type VendorFlips } from '#lib/data.ts';
+	import { currentRealm, withRealm } from '#lib/realm.svelte.ts';
 	import { fmtInt } from '#lib/format.ts';
 	import Money from '#lib/components/Money.svelte';
 	import Pct from '#lib/components/Pct.svelte';
@@ -15,6 +16,8 @@
 	const realm = $derived(currentRealm());
 	let rows = $state<Row[] | null>(null);
 	let error = $state('');
+	/** undefined = loading; null = failed (falls back to latest.min_buyout) */
+	let flips = $state<VendorFlips | null | undefined>(undefined);
 
 	$effect(() => {
 		const r = realm;
@@ -25,6 +28,10 @@
 		getRealmRows(r)
 			.then((d) => !cancelled && (rows = d))
 			.catch((e) => !cancelled && (error = e instanceof Error ? e.message : String(e)));
+		flips = undefined;
+		getVendorFlips(r)
+			.then((d) => !cancelled && (flips = d))
+			.catch(() => !cancelled && (flips = null));
 		return () => (cancelled = true);
 	});
 
@@ -84,6 +91,12 @@
 			.filter((r) => r.ratio < p.dealPct)
 			.sort((a, b) => a.ratio - b.ratio)
 			.slice(0, p.limit)
+	);
+
+	// Auction-level vendor flips when the realm has current auctions, else latest.min_buyout below vendor.
+	const auctionLevel = $derived(!!flips && flips.total > 0);
+	const topFlips = $derived(
+		flips ? [...flips.flips].sort((a, b) => b.profit - a.profit).slice(0, p.limit) : []
 	);
 
 	type VendorDeal = Row & { profit: number };
@@ -258,38 +271,97 @@
 	<section class="panel overflow-hidden">
 		<h2 class="flex items-center gap-2 border-b border-line px-4 py-3 font-semibold">
 			<Coins size={18} class="text-gold" /> Listed below vendor price
+			<a
+				href={withRealm('/vendor')}
+				class="ml-auto inline-flex items-center gap-1 text-xs font-normal text-accent-2 hover:underline"
+				>All vendor flips <ArrowRight size={13} /></a
+			>
 		</h2>
-		<div class="overflow-x-auto">
-			<table class="grid-table">
-				<thead>
-					<tr>
-						<th>Item</th>
-						<th class="r">Min buyout</th>
-						<th class="r hidden sm:table-cell">Vendor</th>
-						<th class="r hidden md:table-cell">Qty</th>
-						<th class="r">Profit / unit</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#if vendor.length === 0}
-						{@render emptyOrLoading(5, 'Nothing is listed below its vendor price.')}
-					{:else}
-						{#each vendor as r (r.item_id)}
-							<tr>
-								<td class="max-w-[12rem] sm:max-w-[18rem]"><ItemName item={r} size={22} /></td>
-								<td class="r"><Money value={r.min_buyout} /></td>
-								<td class="r hidden sm:table-cell"><Money value={r.sell_price} /></td>
-								<td class="r num hidden md:table-cell">{fmtInt(r.quantity)}</td>
-								<td class="r"><Money value={r.profit} /></td>
-							</tr>
+		{#if flips === undefined}
+			<div class="overflow-x-auto">
+				<table class="grid-table">
+					<tbody>
+						{#each Array(6) as _, i (i)}
+							<tr><td><div class="skeleton h-6 w-full"></div></td></tr>
 						{/each}
-					{/if}
-				</tbody>
-			</table>
-		</div>
-		<p class="border-t border-line px-4 py-2 text-xs text-dim">
-			Vendor price is what a merchant pays you. Minimum buyout comes from the latest data, so the
-			cheapest listing may already be gone.
-		</p>
+					</tbody>
+				</table>
+			</div>
+		{:else if auctionLevel}
+			<div class="overflow-x-auto">
+				<table class="grid-table">
+					<thead>
+						<tr>
+							<th>Item</th>
+							<th class="hidden md:table-cell">Seller</th>
+							<th class="r">Buyout</th>
+							<th class="r hidden sm:table-cell">Vendor value</th>
+							<th class="r">Profit</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#if topFlips.length === 0}
+							<tr>
+								<td colspan="5" class="py-8 text-center text-muted">
+									Nothing on the AH right now sells for less than its vendor price.
+								</td>
+							</tr>
+						{:else}
+							{#each topFlips as r, i (i)}
+								<tr>
+									<td class="max-w-[12rem] sm:max-w-[18rem]">
+										<ItemName item={r} size={22} />{#if r.count > 1}<span class="num ml-1 text-xs text-dim"
+												>×{r.count}</span
+											>{/if}
+									</td>
+									<td class="hidden max-w-[8rem] truncate text-muted md:table-cell">{r.owner ?? '—'}</td>
+									<td class="r"><Money value={r.cost} /></td>
+									<td class="r hidden sm:table-cell"><Money value={r.vendor} /></td>
+									<td class="r"><Money value={r.profit} /></td>
+								</tr>
+							{/each}
+						{/if}
+					</tbody>
+				</table>
+			</div>
+			<p class="border-t border-line px-4 py-2 text-xs text-dim">
+				Single auctions whose buyout is below the vendor price × stack, from the latest scan.
+				{fmtInt(flips?.flips.length)} in total; see
+				<a href={withRealm('/vendor')} class="text-accent-2 hover:underline">Vendor flips</a> for filters.
+			</p>
+		{:else}
+			<div class="overflow-x-auto">
+				<table class="grid-table">
+					<thead>
+						<tr>
+							<th>Item</th>
+							<th class="r">Min buyout</th>
+							<th class="r hidden sm:table-cell">Vendor</th>
+							<th class="r hidden md:table-cell">Qty</th>
+							<th class="r">Profit / unit</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#if vendor.length === 0}
+							{@render emptyOrLoading(5, 'Nothing is listed below its vendor price.')}
+						{:else}
+							{#each vendor as r (r.item_id)}
+								<tr>
+									<td class="max-w-[12rem] sm:max-w-[18rem]"><ItemName item={r} size={22} /></td>
+									<td class="r"><Money value={r.min_buyout} /></td>
+									<td class="r hidden sm:table-cell"><Money value={r.sell_price} /></td>
+									<td class="r num hidden md:table-cell">{fmtInt(r.quantity)}</td>
+									<td class="r"><Money value={r.profit} /></td>
+								</tr>
+							{/each}
+						{/if}
+					</tbody>
+				</table>
+			</div>
+			<p class="border-t border-line px-4 py-2 text-xs text-dim">
+				Vendor price is what a merchant pays you. Minimum buyout comes from the latest data, so the
+				cheapest listing may already be gone.
+			</p>
+		{/if}
 	</section>
 </div>
