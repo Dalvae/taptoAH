@@ -1,0 +1,9 @@
+name = "taptoah"
+pages_build_output_dir = ".svelte-kit/cloudflare"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_als"]
+
+# Parquet/JSON data files, streamed same-origin at /data/<file> by src/routes/data/[...path]/+server.ts
+[[r2_buckets]]
+binding = "DATA"
+bucket_name = "taptoah-data"
