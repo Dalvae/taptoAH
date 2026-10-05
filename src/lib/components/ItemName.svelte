@@ -1,6 +1,6 @@
 <script lang="ts">
 	import ItemIcon from './ItemIcon.svelte';
-	import { qualityColor } from '#lib/wow.ts';
+	import { qualityColor, wowheadTooltip } from '#lib/wow.ts';
 	import { withRealm } from '#lib/realm.svelte.ts';
 	import { itemName } from '#lib/data.ts';
 
@@ -15,6 +15,7 @@
 
 <a
 	href={withRealm(`/item/${item.item_id}`)}
+	data-wowhead={wowheadTooltip(item.item_id)}
 	class="inline-flex min-w-0 max-w-full items-center gap-2 hover:underline"
 >
 	<ItemIcon icon={item.icon} quality={item.quality} {size} />

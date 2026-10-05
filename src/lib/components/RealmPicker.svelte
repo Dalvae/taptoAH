@@ -8,6 +8,7 @@
 	const label = $derived(realmLabel(current));
 
 	function factionColor(f: string) {
+		if (!f) return 'var(--color-primary)'; // cross-faction auction house
 		return f.toLowerCase() === 'horde' ? 'var(--color-horde)' : 'var(--color-alliance)';
 	}
 </script>
@@ -41,7 +42,7 @@
 			class="panel absolute top-full right-0 z-50 mt-1 w-72 overflow-hidden shadow-2xl shadow-black/60"
 			role="listbox"
 		>
-			<div class="label border-b border-line px-3 py-2">Realm / faction</div>
+			<div class="label border-b border-line px-3 py-2">Realm</div>
 			{#each realmList() as key (key)}
 				{@const l = realmLabel(key)}
 				{@const m = realmState.meta?.realms[key]}
@@ -59,7 +60,9 @@
 					<span class="mt-1.5 h-2 w-2 flex-none rounded-full" style="background:{factionColor(l.faction)}"
 					></span>
 					<span class="min-w-0">
-						<span class="block text-sm font-medium">{l.realm} <span class="text-muted">· {l.faction}</span></span>
+						<span class="block text-sm font-medium"
+							>{l.realm}{#if l.faction}<span class="text-muted"> · {l.faction}</span>{/if}</span
+						>
 						<span class="block text-xs text-muted">
 							Updated {relativeTime(realmLastUpdate(m))}
 							{#if m?.last_scan}· own scan {relativeTime(m.last_scan)}{/if}

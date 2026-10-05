@@ -225,3 +225,8 @@ export const INVENTORY_TYPES: Record<number, string> = {
 export function wowheadUrl(id: number): string {
 	return `https://www.wowhead.com/wotlk/item=${id}`;
 }
+
+/** data-wowhead value for Wowhead's WotLK tooltip; undefined for server-custom items Wowhead lacks. */
+export function wowheadTooltip(itemId: number | null | undefined): string | undefined {
+	return itemId != null && itemId > 0 && itemId < 100000 ? `item=${itemId}&domain=wotlk` : undefined;
+}

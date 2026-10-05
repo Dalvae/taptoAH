@@ -51,7 +51,7 @@ def import_file(con, path):
         m = re.search(r'\["scanData"\] = "([^"]*)"', body)
         if not m:
             continue
-        key = f"{realm.replace(' ', '-')}_{faction}"
+        key = db.realm_key(realm)  # cross-faction AH: both factions' scans are the same market
         rows, latest = [], []
         for k, _a, mv, last, _d, minb, rest in ITEM_RE.findall(m.group(1)):
             item = decode(k)

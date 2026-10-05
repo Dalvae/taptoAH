@@ -22,7 +22,8 @@
 		QUALITIES,
 		INVENTORY_TYPES,
 		TIME_LEFT,
-		wowheadUrl
+		wowheadUrl,
+		wowheadTooltip
 	} from '#lib/wow.ts';
 	import { fmtInt, pctChange, relativeTime, absTime, moneyText } from '#lib/format.ts';
 	import ItemIcon from '#lib/components/ItemIcon.svelte';
@@ -85,12 +86,17 @@
 	];
 	let range = $state('30d');
 	let clip = $state(true);
+	// The chart always spans the chosen window (7d shows 7 days even with few data points).
+	const chartWindow = $derived.by((): [number, number] => {
+		const last = Math.max(Math.floor(Date.now() / 86400000), history?.at(-1)?.day ?? 0);
+		const days = RANGES.find((r) => r.key === range)!.days;
+		if (Number.isFinite(days)) return [last - days + 1, last];
+		return [Math.min(history?.[0]?.day ?? last, last - 6), last];
+	});
 	const visible = $derived.by(() => {
 		if (!history) return [];
-		const days = RANGES.find((r) => r.key === range)!.days;
-		if (!Number.isFinite(days)) return history;
-		const last = Math.max(Math.floor(Date.now() / 86400000), history.at(-1)?.day ?? 0);
-		return history.filter((p) => p.day > last - days);
+		const [from, to] = chartWindow;
+		return history.filter((p) => p.day >= from && p.day <= to);
 	});
 
 	// ---- weekday heatmap (last 12 weeks of daily market values) ---------------------------------
@@ -177,7 +183,9 @@
 					<div class="skeleton h-4 w-40"></div>
 				</div>
 			{:else}
-				<ItemIcon icon={item?.icon} quality={item?.quality} size={56} />
+				<span data-wowhead={wowheadTooltip(data.id)} class="inline-flex"
+					><ItemIcon icon={item?.icon} quality={item?.quality} size={56} /></span
+				>
 				<div class="min-w-0 flex-1">
 					<h1 class="text-xl font-bold sm:text-2xl" style="color:{qualityColor(item?.quality)}">
 						{name}
@@ -216,7 +224,10 @@
 					</div>
 				</div>
 				<div class="text-right text-xs text-muted">
-					<div>{realmLabel(realm).realm} · {realmLabel(realm).faction}</div>
+					<div>
+						{realmLabel(realm).realm}{#if realmLabel(realm).faction}
+							· {realmLabel(realm).faction}{/if}
+					</div>
 					{#if latest?.seen}
 						<div title={absTime(latest.seen)}>Last seen {relativeTime(latest.seen)}</div>
 						<div class="text-dim">source: {latest.source === 'scan' ? 'own scan' : 'TSM'}</div>
@@ -278,7 +289,7 @@
 					No price history in this range{history.length ? '' : ' for this realm'}.
 				</div>
 			{:else}
-				<PriceChart points={visible} {clip} />
+				<PriceChart points={visible} {clip} window={chartWindow} />
 				{#if visible.every((p) => p.source === 'tsm')}
 					<p class="mt-2 text-xs text-dim">
 						Daily market values imported from TSM. Min buyout and quantity history start with our own scans.

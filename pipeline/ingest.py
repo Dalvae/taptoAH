@@ -37,7 +37,7 @@ def market_value(units):
 def load_file(con, path):
     with open(path, encoding="utf-8", errors="replace") as f:
         meta = dict(kv.split("=", 1) for kv in f.readline().lstrip("# ").split())
-        realm, scan_time = meta["realm_faction"], int(meta["scan_time"])
+        realm, scan_time = db.realm_key(meta["realm_faction"]), int(meta["scan_time"])
         if con.execute("SELECT 1 FROM scans WHERE realm=? AND scan_time=?", (realm, scan_time)).fetchone():
             return None
         cur = con.execute("INSERT INTO scans (realm, scan_time, source, total, unread) VALUES (?,?,?,?,?)",

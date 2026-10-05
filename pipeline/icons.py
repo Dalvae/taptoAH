@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.request
 
@@ -38,19 +39,23 @@ def main(out):
         SELECT item_id FROM (SELECT item_id FROM tsm_latest UNION SELECT item_id FROM item_stats)
         WHERE item_id NOT IN (SELECT item_id FROM item_icons) ORDER BY item_id""")]
     print(f"{len(todo)} items to look up")
-    for n, item in enumerate(todo, 1):
+
+    def lookup(item):
         try:
-            icon = json.loads(get(TOOLTIP.format(item))).get("icon") or ""
+            return item, (json.loads(get(TOOLTIP.format(item))).get("icon") or "").lower()
         except urllib.error.HTTPError as e:
-            icon = "" if e.code == 404 else None
+            return item, "" if e.code == 404 else None
         except Exception:
-            icon = None
-        if icon is not None:
-            con.execute("INSERT OR REPLACE INTO item_icons VALUES (?, ?)", (item, icon.lower()))
-        if n % 100 == 0:
-            con.commit()
-            print(f"  {n}/{len(todo)}")
-        time.sleep(0.2)
+            return item, None
+
+    # a few requests at a time: fast enough, and gentle with Wowhead
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for n, (item, icon) in enumerate(pool.map(lookup, todo), 1):
+            if icon is not None:
+                con.execute("INSERT OR REPLACE INTO item_icons VALUES (?, ?)", (item, icon))
+            if n % 200 == 0:
+                con.commit()
+                print(f"  {n}/{len(todo)}", flush=True)
     con.commit()
     if out is None:
         return

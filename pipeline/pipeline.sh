@@ -11,7 +11,8 @@
 #   TAPTOAH_WTF_DIRS   game WTF/Account folders to read TSM from, ':'-separated
 #                      (e.g. /games/wow/WTF/Account:$HOME/Library/Games/wow/WTF/Account)
 #   TAPTOAH_SCANS_DIR  folder where auction dump files (*.tsv) appear (optional)
-#   ~/.config/taptoah/cloudflare.env   CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=...
+#   ~/.config/taptoah/cloudflare.env   CLOUDFLARE_ACCOUNT_ID=... and CLOUDFLARE_API_TOKEN=... (optional:
+#                      without a token the `wrangler login` session is used, refreshed by cf_token.py)
 #   Files pushed from another machine go to $TAPTOAH_DATA/incoming/<host>/<ACCOUNT>/SavedVariables/.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -75,6 +76,10 @@ fi
 CF="$HOME/.config/taptoah/cloudflare.env"
 if [ ! -f "$CF" ]; then echo "no $CF: skipping upload"; exit 0; fi
 set -a; . "$CF"; set +a
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+  CLOUDFLARE_API_TOKEN=$(python3 "$HERE/cf_token.py") || { echo "no Cloudflare credentials: skipping upload"; exit 1; }
+  export CLOUDFLARE_API_TOKEN
+fi
 for f in items history latest auctions; do
   npx --yes wrangler r2 object put "$BUCKET/$f.parquet" --file "$DATA/public/$f.parquet" --remote \
     --content-type application/octet-stream --cache-control "public, max-age=300" 2>&1 | grep -E "Upload complete|ERROR"

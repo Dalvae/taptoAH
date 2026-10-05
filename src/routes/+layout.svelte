@@ -5,7 +5,8 @@
 	import Logo from '#lib/components/Logo.svelte';
 	import HeaderSearch from '#lib/components/HeaderSearch.svelte';
 	import RealmPicker from '#lib/components/RealmPicker.svelte';
-	import { realmState, withRealm } from '#lib/realm.svelte.ts';
+	import { realmState, withRealm, currentRealm } from '#lib/realm.svelte.ts';
+	import { realmLastUpdate } from '#lib/data.ts';
 	import { relativeTime, absTime } from '#lib/format.ts';
 
 	let { children, data }: LayoutProps = $props();
@@ -55,8 +56,13 @@
 			</div>
 			<div class="ml-auto flex items-center gap-3 sm:ml-0">
 				{#if data.meta}
-					<span class="hidden text-xs text-muted md:inline" title={absTime(data.meta.generated_at)}>
-						Data updated {relativeTime(data.meta.generated_at, now)}
+					{@const lastScan = realmLastUpdate(data.meta.realms?.[currentRealm()])}
+					<span
+						class="hidden text-right text-xs leading-tight text-muted md:inline"
+						title="Data updated {absTime(data.meta.generated_at)}"
+					>
+						Last scan <span class="text-foreground">{absTime(lastScan)}</span>
+						<br />{relativeTime(lastScan, now)}
 					</span>
 				{/if}
 				<RealmPicker />

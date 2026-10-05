@@ -4,7 +4,16 @@
 	import type { HistoryPoint } from '#lib/data.ts';
 	import { moneyText, fmtInt } from '#lib/format.ts';
 
-	let { points, clip = true }: { points: HistoryPoint[]; clip?: boolean } = $props();
+	// window = [firstDay, lastDay] shown on the x axis (days since epoch, UTC)
+	let {
+		points,
+		clip = true,
+		window: win
+	}: { points: HistoryPoint[]; clip?: boolean; window?: [number, number] } = $props();
+
+	const DAY = 86400;
+	const dateLabel = (sec: number, opts: Intl.DateTimeFormatOptions) =>
+		new Date(sec * 1000).toLocaleDateString('en-US', { ...opts, timeZone: 'UTC' });
 
 	let el: HTMLDivElement;
 	let chart: uPlot | null = null;
@@ -47,7 +56,7 @@
 		chart?.destroy();
 		chart = null;
 		if (!el || points.length === 0) return;
-		const xs = points.map((p) => p.day * 86400);
+		const xs = points.map((p) => p.day * DAY + DAY / 2);
 		const pmax = priceScale.max;
 		const hasQty = points.some((p) => p.quantity != null);
 		const hasMin = points.some((p) => p.min_buyout != null);
@@ -66,7 +75,15 @@
 		];
 		const cols: (number | null)[][] = [xs];
 		const axes: uPlot.Axis[] = [
-			{ stroke: COLORS.axis, grid: { stroke: COLORS.grid }, ticks: { stroke: COLORS.grid } },
+			{
+				stroke: COLORS.axis,
+				grid: { stroke: COLORS.grid },
+				ticks: { stroke: COLORS.grid },
+				// whole days only: no "10pm / 12am" hour ticks on short ranges
+				incrs: [DAY, 2 * DAY, 7 * DAY, 14 * DAY, 30 * DAY, 91 * DAY, 182 * DAY, 365 * DAY],
+				space: 48,
+				values: (_u, vals) => vals.map((v) => dateLabel(v, { month: 'short', day: 'numeric' }))
+			},
 			{
 				scale: 'price',
 				stroke: COLORS.axis,
@@ -129,7 +146,11 @@
 			padding: [12, 8, 0, 4],
 			cursor: { points: { size: 7 }, drag: { x: true, y: false } },
 			scales: {
-				x: { time: true },
+				x: {
+					time: true,
+					range: (_u, min, max) =>
+						win ? [win[0] * DAY, (win[1] + 1) * DAY] : [min - DAY / 2, max + DAY / 2]
+				},
 				price: { range: () => [0, pmax] },
 				qty: { range: (_u, _min, max) => [0, Math.max(1, (max ?? 1) * 2.5)] }
 			},
@@ -144,6 +165,7 @@
 	$effect(() => {
 		void points;
 		void priceScale;
+		void win;
 		build();
 	});
 

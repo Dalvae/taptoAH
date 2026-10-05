@@ -18,7 +18,7 @@ DEFAULT_PATH = os.path.expanduser(os.environ.get("AH_DB", "~/.local/share/wow-ah
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS scans (
   scan_id     INTEGER PRIMARY KEY,
-  realm       TEXT NOT NULL,         -- 'Frostmourne_Alliance'
+  realm       TEXT NOT NULL,         -- 'Frostmourne' (cross-faction auction house)
   scan_time   INTEGER NOT NULL,
   source      TEXT NOT NULL,         -- file name it came from
   total       INTEGER NOT NULL,      -- auctions the server reported
@@ -81,6 +81,16 @@ CREATE TABLE IF NOT EXISTS tsm_latest (
   PRIMARY KEY (realm, item_id)
 );
 """
+
+
+def realm_key(realm, faction=None):
+    """Realm key used everywhere: 'Frostmourne'. Frostmourne's auction house is cross-faction, so the
+    faction is not part of the key ('Frostmourne_Alliance' from older files maps to 'Frostmourne')."""
+    realm = realm.replace(" ", "-")
+    for f in ("_Alliance", "_Horde", "_Neutral"):
+        if realm.endswith(f):
+            realm = realm[: -len(f)]
+    return realm
 
 
 def connect(path=DEFAULT_PATH):
