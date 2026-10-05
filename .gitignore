@@ -26,3 +26,7 @@ vite.config.ts.timestamp-*
 # Local data (pnpm data:pull), never committed; production data lives in R2
 /data/
 /data-test/
+
+# Python
+__pycache__/
+*.pyc

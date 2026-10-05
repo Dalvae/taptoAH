@@ -24,6 +24,12 @@ mascot and visual identity.
   pays for the stack, with seller, profit, ROI and time left. Filters (min profit, min ROI,
   max buyout, text) live in the URL. Bid-only chances are listed separately. It is only a
   list: nothing is bought automatically.
+- **Sellers** (`/sellers`): leaderboard of who sells on the realm (live auctions, live value,
+  distinct items, share of all auctions, main categories, 7-day sales and sell-through, median
+  price vs market, last seen), market-concentration tiles and a 30-day activity chart. Each
+  seller has a profile at `/seller/<name>` (current auctions, items they dominate, categories,
+  daily activity, recent events), and seller names across the site link to it. The item page
+  shows a Market share card (top sellers by live quantity and 7-day sales).
 - **Header**: instant item autocomplete and a realm/faction picker that shows data
   freshness. The chosen realm is kept in `?realm=` and in localStorage.
 
@@ -167,6 +173,7 @@ src/
     +page.svelte                 Browse
     item/[id]/                   Item detail
     movers/                      Movers & Deals
+    sellers/, seller/[name]/     Seller leaderboard + seller profile
     data/[...path]/+server.ts    R2 proxy with Range support
 scripts/pull-data.mjs            pnpm data:pull
 ```

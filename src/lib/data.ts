@@ -375,6 +375,287 @@ export function getSold24h(realm: string): Promise<Map<number, number>> {
 	});
 }
 
+// ---- sellers --------------------------------------------------------------------------------------
+
+/** One seller's footprint on a realm: live auctions (latest scan) plus the last 7 days of events. */
+export interface SellerStats {
+	owner: string;
+	/** Live auctions / units / sum of buyouts / distinct items. */
+	listings: number;
+	units: number;
+	value: number;
+	items: number;
+	/** % of all live auctions on the realm. */
+	share: number | null;
+	/** Item classes by number of live auctions, most first (-1 = unknown). */
+	classes: number[];
+	sold7d: number;
+	soldValue7d: number;
+	expired7d: number;
+	new7d: number;
+	/** sold / (sold + expired) over 7 days, %. */
+	sellThrough: number | null;
+	/** Median unit buyout / market value over their live auctions (1 = at market). */
+	priceRatio: number | null;
+	/** Newest scan that saw one of their auctions, or their newest event (90 days). */
+	lastSeen: number | null;
+	search: string;
+}
+
+export interface SellerDay {
+	day: number;
+	/** Distinct sellers with any event that day. */
+	sellers: number;
+	listed: number;
+	sold: number;
+	expired: number;
+}
+
+export interface SellerBoard {
+	/** All live auctions on the realm, including ones without a known seller. */
+	totalListings: number;
+	totalValue: number;
+	sellers: SellerStats[];
+	/** Last 30 days of events, by day. */
+	days: SellerDay[];
+	hasEvents: boolean;
+}
+
+/** Column names of a remote parquet file (reads only the footer). */
+async function columns(f: string): Promise<Set<string>> {
+	const rows = await query<{ column_name: string }>(`DESCRIBE SELECT * FROM read_parquet('${f}')`);
+	return new Set(rows.map((r) => r.column_name));
+}
+
+const sellerCache = new Map<string, Promise<SellerBoard>>();
+
+/**
+ * Seller leaderboard for a realm. Three realm-wide queries: live auctions grouped by owner, events
+ * grouped by owner, events grouped by day. Cached per realm.
+ */
+export function getSellers(realm: string): Promise<SellerBoard> {
+	return memo(sellerCache, realm, async () => {
+		await ensureBaseTables();
+		const board: SellerBoard = { totalListings: 0, totalValue: 0, sellers: [], days: [], hasEvents: false };
+		const byOwner = new Map<string, SellerStats>();
+		const seller = (owner: string): SellerStats => {
+			let s = byOwner.get(owner);
+			if (!s) {
+				s = {
+					owner,
+					listings: 0,
+					units: 0,
+					value: 0,
+					items: 0,
+					share: null,
+					classes: [],
+					sold7d: 0,
+					soldValue7d: 0,
+					expired7d: 0,
+					new7d: 0,
+					sellThrough: null,
+					priceRatio: null,
+					lastSeen: null,
+					search: owner.toLowerCase()
+				};
+				byOwner.set(owner, s);
+			}
+			return s;
+		};
+
+		if (await hasFile('auctions.parquet')) {
+			const f = await file('auctions.parquet');
+			const cols = await columns(f);
+			const owner = cols.has('owner') ? 'a.owner' : 'NULL::VARCHAR';
+			const seen = cols.has('seen') ? 'a.seen' : 'NULL::BIGINT';
+			const rows = await query<{
+				owner: string | null;
+				listings: number;
+				units: number;
+				value: number;
+				items: number;
+				last_seen: number | null;
+				ratio: number | null;
+				classes: string | null;
+			}>(
+				`WITH a AS (
+				   SELECT ${owner} AS owner, a.item_id, a.count, a.buyout, ${seen} AS seen, i.class,
+				          CASE WHEN a.unit_buyout > 0 AND l.market_value > 0 THEN a.unit_buyout / l.market_value END AS ratio
+				     FROM read_parquet('${f}') a
+				     LEFT JOIN items i USING (item_id)
+				     LEFT JOIN latest l ON l.realm = a.realm AND l.item_id = a.item_id
+				    WHERE a.realm = ?
+				 ), c AS (
+				   SELECT owner, coalesce(class, -1) AS class, count(*) AS n FROM a GROUP BY ALL
+				 ), top AS (
+				   SELECT owner, string_agg(class::VARCHAR, ',' ORDER BY n DESC, class) AS classes FROM c GROUP BY owner
+				 )
+				 SELECT a.owner, count(*)::INTEGER AS listings, sum(a.count)::DOUBLE AS units,
+				        coalesce(sum(a.buyout), 0)::DOUBLE AS value, count(DISTINCT a.item_id)::INTEGER AS items,
+				        max(a.seen) AS last_seen, median(a.ratio) AS ratio, any_value(top.classes) AS classes
+				   FROM a LEFT JOIN top ON top.owner IS NOT DISTINCT FROM a.owner
+				  GROUP BY a.owner`,
+				[realm]
+			);
+			for (const r of rows) {
+				board.totalListings += r.listings;
+				board.totalValue += r.value;
+				if (!r.owner) continue;
+				Object.assign(seller(r.owner), {
+					listings: r.listings,
+					units: r.units,
+					value: r.value,
+					items: r.items,
+					classes: (r.classes ?? '').split(',').filter(Boolean).map(Number),
+					priceRatio: r.ratio,
+					lastSeen: r.last_seen
+				});
+			}
+		}
+
+		if (await hasFile('events.parquet')) {
+			board.hasEvents = true;
+			const f = await file('events.parquet');
+			const now = Math.floor(Date.now() / 1000);
+			const since7 = now - 7 * 86400;
+			const rows = await query<{
+				owner: string;
+				sold: number;
+				sold_value: number;
+				expired: number;
+				listed: number;
+				last_event: number | null;
+			}>(
+				`SELECT owner,
+				        count(*) FILTER (WHERE kind = 'sold' AND time > ${since7})::INTEGER AS sold,
+				        coalesce(sum(buyout) FILTER (WHERE kind = 'sold' AND time > ${since7}), 0)::DOUBLE AS sold_value,
+				        count(*) FILTER (WHERE kind = 'expired' AND time > ${since7})::INTEGER AS expired,
+				        count(*) FILTER (WHERE kind = 'new' AND time > ${since7})::INTEGER AS listed,
+				        max(time) AS last_event
+				   FROM read_parquet('${f}')
+				  WHERE realm = ? AND owner IS NOT NULL
+				  GROUP BY owner`,
+				[realm]
+			);
+			for (const r of rows) {
+				const s = seller(r.owner);
+				s.sold7d = r.sold;
+				s.soldValue7d = r.sold_value;
+				s.expired7d = r.expired;
+				s.new7d = r.listed;
+				const done = r.sold + r.expired;
+				s.sellThrough = done ? (r.sold / done) * 100 : null;
+				s.lastSeen = Math.max(s.lastSeen ?? 0, r.last_event ?? 0) || null;
+			}
+			board.days = await query<SellerDay>(
+				`SELECT (time // 86400)::INTEGER AS day,
+				        count(DISTINCT owner)::INTEGER AS sellers,
+				        count(*) FILTER (WHERE kind = 'new')::INTEGER AS listed,
+				        count(*) FILTER (WHERE kind = 'sold')::INTEGER AS sold,
+				        count(*) FILTER (WHERE kind = 'expired')::INTEGER AS expired
+				   FROM read_parquet('${f}')
+				  WHERE realm = ? AND time > ${now - 30 * 86400}
+				  GROUP BY ALL ORDER BY day`,
+				[realm]
+			);
+		}
+
+		for (const s of byOwner.values()) {
+			s.share = board.totalListings ? (s.listings / board.totalListings) * 100 : null;
+		}
+		board.sellers = [...byOwner.values()].sort((a, b) => b.listings - a.listings || b.sold7d - a.sold7d);
+		return board;
+	});
+}
+
+/** A seller's live auction, with item metadata, market value and the item's realm-wide totals. */
+export type SellerAuction = Auction &
+	Pick<Item, 'item_id' | 'name' | 'quality' | 'icon' | 'class'> & {
+		market_value: number | null;
+		/** All live auctions / units / sellers of this item on the realm. */
+		item_listings: number;
+		item_units: number;
+		item_sellers: number;
+	};
+
+/** Every live auction of one seller (one query). Empty when there is no auction-level data. */
+export async function getSellerAuctions(realm: string, owner: string): Promise<SellerAuction[]> {
+	if (!(await hasFile('auctions.parquet'))) return [];
+	await ensureBaseTables();
+	const f = await file('auctions.parquet');
+	if (!(await columns(f)).has('owner')) return [];
+	const rows = await query<Partial<SellerAuction> & { item_id: number }>(
+		`WITH a AS (SELECT * FROM read_parquet('${f}') WHERE realm = ?),
+		      mine AS (SELECT * FROM a WHERE owner = ?),
+		      tot AS (
+		        SELECT item_id, count(*)::INTEGER AS item_listings, sum(count)::INTEGER AS item_units,
+		               count(DISTINCT owner)::INTEGER AS item_sellers
+		          FROM a WHERE item_id IN (SELECT item_id FROM mine) GROUP BY item_id
+		      )
+		 SELECT m.* EXCLUDE (realm), i.name, i.quality, i.icon, i.class, l.market_value,
+		        tot.item_listings, tot.item_units, tot.item_sellers
+		   FROM mine m
+		   LEFT JOIN items i USING (item_id)
+		   LEFT JOIN (SELECT item_id, market_value FROM latest WHERE realm = ?) l USING (item_id)
+		   LEFT JOIN tot USING (item_id)
+		  ORDER BY m.item_id, m.unit_buyout NULLS LAST`,
+		[realm, owner, realm]
+	);
+	return rows.map((r) => ({
+		item_id: r.item_id,
+		name: r.name ?? null,
+		quality: r.quality ?? null,
+		icon: r.icon ?? null,
+		class: r.class ?? null,
+		suffix_id: r.suffix_id ?? null,
+		count: r.count ?? 1,
+		bid: r.bid ?? null,
+		buyout: r.buyout ?? null,
+		unit_buyout: r.unit_buyout ?? null,
+		time_left: r.time_left ?? null,
+		owner: r.owner ?? null,
+		seen: r.seen ?? null,
+		market_value: r.market_value ?? null,
+		item_listings: r.item_listings ?? 0,
+		item_units: r.item_units ?? 0,
+		item_sellers: r.item_sellers ?? 0
+	}));
+}
+
+export type SellerEvent = Omit<AuctionEvent, 'owner'> & Pick<Item, 'item_id' | 'name' | 'quality' | 'icon'>;
+
+export interface SellerActivity {
+	/** new / sold / expired counts per day over the 90-day window. */
+	days: SellerDay[];
+	/** Newest events first. */
+	recent: SellerEvent[];
+}
+
+/** One seller's events: daily counts plus the newest 100. Null when events.parquet is not published. */
+export async function getSellerActivity(realm: string, owner: string): Promise<SellerActivity | null> {
+	if (!(await hasFile('events.parquet'))) return null;
+	await ensureBaseTables();
+	const f = await file('events.parquet');
+	const days = await query<SellerDay>(
+		`SELECT (time // 86400)::INTEGER AS day, 1 AS sellers,
+		        count(*) FILTER (WHERE kind = 'new')::INTEGER AS listed,
+		        count(*) FILTER (WHERE kind = 'sold')::INTEGER AS sold,
+		        count(*) FILTER (WHERE kind = 'expired')::INTEGER AS expired
+		   FROM read_parquet('${f}')
+		  WHERE realm = ? AND owner = ?
+		  GROUP BY ALL ORDER BY day`,
+		[realm, owner]
+	);
+	const recent = await query<SellerEvent>(
+		`SELECT e.item_id, e.time, e.kind, e.suffix_id, e.count, e.buyout, i.name, i.quality, i.icon
+		   FROM read_parquet('${f}') e LEFT JOIN items i USING (item_id)
+		  WHERE e.realm = ? AND e.owner = ?
+		  ORDER BY e.time DESC LIMIT 100`,
+		[realm, owner]
+	);
+	return { days, recent };
+}
+
 export interface IndexEntry {
 	item_id: number;
 	name: string | null;

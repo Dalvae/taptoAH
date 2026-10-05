@@ -24,10 +24,13 @@
 	const nav = [
 		{ href: '/', label: 'Browse' },
 		{ href: '/movers', label: 'Movers & Deals' },
-		{ href: '/vendor', label: 'Vendor flips' }
+		{ href: '/vendor', label: 'Vendor flips' },
+		{ href: '/sellers', label: 'Sellers' }
 	];
 	function isActive(href: string) {
-		return href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href);
+		if (href === '/') return page.url.pathname === '/';
+		if (href === '/sellers') return page.url.pathname.startsWith('/seller');
+		return page.url.pathname.startsWith(href);
 	}
 </script>
 

@@ -33,6 +33,7 @@
 	import Money from '#lib/components/Money.svelte';
 	import Pct from '#lib/components/Pct.svelte';
 	import PriceChart from '#lib/components/PriceChart.svelte';
+	import SellerLink from '#lib/components/SellerLink.svelte';
 
 	let { data }: PageProps = $props();
 
@@ -201,6 +202,31 @@
 	});
 
 	const hasOwner = $derived(!!auctions?.some((a) => a.owner));
+
+	// ---- market share: who holds the live quantity and who sold the most units in 7 days ---------
+	const marketShare = $derived.by(() => {
+		const by = new Map<string, { owner: string; units: number; sold: number }>();
+		const entry = (owner: string) => {
+			let e = by.get(owner);
+			if (!e) by.set(owner, (e = { owner, units: 0, sold: 0 }));
+			return e;
+		};
+		let units = 0;
+		let sold = 0;
+		for (const a of auctions ?? []) {
+			units += a.count;
+			if (a.owner) entry(a.owner).units += a.count;
+		}
+		const since = Date.now() / 1000 - 7 * 86400;
+		for (const e of events ?? []) {
+			if (e.time <= since) break; // newest first
+			if (e.kind !== 'sold') continue;
+			sold += e.count;
+			if (e.owner) entry(e.owner).sold += e.count;
+		}
+		const rows = [...by.values()].sort((a, b) => b.units - a.units || b.sold - a.sold);
+		return { units, sold, rows: rows.slice(0, 8), sellers: rows.length };
+	});
 	const change = $derived(pctChange(latest?.market_value ?? null, latest?.mv_14d ?? null));
 </script>
 
@@ -442,9 +468,7 @@
 									<td class="text-muted" title={a.time_left ? TIME_LEFT[a.time_left]?.hint : ''}
 										>{a.time_left ? (TIME_LEFT[a.time_left]?.label ?? a.time_left) : '—'}</td
 									>
-									{#if hasOwner}<td class="max-w-[8rem] truncate text-muted" title={a.owner ?? ''}
-											>{a.owner ?? '—'}</td
-										>{/if}
+									{#if hasOwner}<td class="max-w-[8rem] truncate text-muted"><SellerLink name={a.owner} /></td>{/if}
 								</tr>
 							{/each}
 						</tbody>
@@ -452,6 +476,39 @@
 				</div>
 			{/if}
 		</section>
+
+		{#if marketShare.rows.length}
+			<section class="panel p-4">
+				<div class="mb-2 flex items-baseline justify-between">
+					<h2 class="font-semibold">Market share</h2>
+					<span class="text-xs text-muted">{fmtInt(marketShare.sellers)} sellers</span>
+				</div>
+				<table class="grid-table">
+					<thead>
+						<tr>
+							<th>Seller</th>
+							<th class="r" title="Share of the units listed right now">Live qty</th>
+							<th class="r" title="Share of the units sold (or cancelled) in the last 7 days">Sales 7d</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each marketShare.rows as m (m.owner)}
+							<tr>
+								<td class="max-w-[9rem] truncate"><SellerLink name={m.owner} /></td>
+								<td class="r num" title="{fmtInt(m.units)} of {fmtInt(marketShare.units)} units">
+									{marketShare.units ? `${((m.units / marketShare.units) * 100).toFixed(0)}%` : '—'}
+									<span class="text-xs text-dim">({fmtInt(m.units)})</span>
+								</td>
+								<td class="r num" title="{fmtInt(m.sold)} of {fmtInt(marketShare.sold)} units">
+									{marketShare.sold ? `${((m.sold / marketShare.sold) * 100).toFixed(0)}%` : '—'}
+									<span class="text-xs text-dim">({fmtInt(m.sold)})</span>
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</section>
+		{/if}
 
 		<section class="panel p-4">
 			<h2 class="mb-2 font-semibold">Sales</h2>
@@ -506,7 +563,7 @@
 								<tr>
 									<td class="text-muted" title={absTime(e.time)}>{relativeTime(e.time)}</td>
 									<td class={k?.cls ?? ''}>{k?.label ?? e.kind}</td>
-									<td class="max-w-[7rem] truncate text-muted" title={e.owner ?? ''}>{e.owner ?? '—'}</td>
+									<td class="max-w-[7rem] truncate text-muted"><SellerLink name={e.owner} /></td>
 									<td class="r num">{e.count}</td>
 									<td class="r"><Money value={e.buyout && e.count ? e.buyout / e.count : null} /></td>
 								</tr>

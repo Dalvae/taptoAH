@@ -9,6 +9,7 @@
 	import { fmtInt, relativeTime, absTime } from '#lib/format.ts';
 	import Money from '#lib/components/Money.svelte';
 	import ItemName from '#lib/components/ItemName.svelte';
+	import SellerLink from '#lib/components/SellerLink.svelte';
 
 	// ---- data -----------------------------------------------------------------------------------
 	const realm = $derived(currentRealm());
@@ -284,12 +285,10 @@
 							<td class="item-cell">
 								<ItemName item={r} size={22} />
 								<div class="text-xs text-dim sm:hidden">
-									{r.count > 1 ? `${r.count}× · ` : ''}{r.owner ?? ''}
+									{r.count > 1 ? `${r.count}× · ` : ''}{#if r.owner}<SellerLink name={r.owner} />{/if}
 								</div>
 							</td>
-							<td class="hidden max-w-[9rem] truncate text-muted sm:table-cell" title={r.owner ?? ''}
-								>{r.owner ?? '—'}</td
-							>
+							<td class="hidden max-w-[9rem] truncate text-muted sm:table-cell"><SellerLink name={r.owner} /></td>
 							<td class="r num hidden sm:table-cell">{r.count}</td>
 							<td class="r"><Money value={r.cost} /></td>
 							<td class="r hidden md:table-cell"><Money value={r.vendor} /></td>
@@ -364,9 +363,7 @@
 					{#each bids as r, i (i)}
 						<tr>
 							<td class="item-cell"><ItemName item={r} size={22} /></td>
-							<td class="hidden max-w-[9rem] truncate text-muted sm:table-cell" title={r.owner ?? ''}
-								>{r.owner ?? '—'}</td
-							>
+							<td class="hidden max-w-[9rem] truncate text-muted sm:table-cell"><SellerLink name={r.owner} /></td>
 							<td class="r num hidden sm:table-cell">{r.count}</td>
 							<td class="r"><Money value={r.cost} /></td>
 							<td class="r hidden md:table-cell"><Money value={r.buyout || null} /></td>

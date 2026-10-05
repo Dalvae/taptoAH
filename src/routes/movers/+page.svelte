@@ -12,6 +12,7 @@
 	import Money from '#lib/components/Money.svelte';
 	import Pct from '#lib/components/Pct.svelte';
 	import ItemName from '#lib/components/ItemName.svelte';
+	import SellerLink from '#lib/components/SellerLink.svelte';
 
 	const realm = $derived(currentRealm());
 	let rows = $state<Row[] | null>(null);
@@ -314,7 +315,7 @@
 												>×{r.count}</span
 											>{/if}
 									</td>
-									<td class="hidden max-w-[8rem] truncate text-muted md:table-cell">{r.owner ?? '—'}</td>
+									<td class="hidden max-w-[8rem] truncate text-muted md:table-cell"><SellerLink name={r.owner} /></td>
 									<td class="r"><Money value={r.cost} /></td>
 									<td class="r hidden sm:table-cell"><Money value={r.vendor} /></td>
 									<td class="r"><Money value={r.profit} /></td>
