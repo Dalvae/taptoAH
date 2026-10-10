@@ -67,39 +67,9 @@ COLUMNS = {
 }
 
 
-VS_LOG = "/mnt/capital/games/CopilotBuddy/Settings/VendorSearch/log.tsv"
-
-
-def drop_bought(rows):
-    """auctions.parquet keeps the newest scan's auctions until the next scan, so the page's vendor flip listed what
-    Dinarzad's VendorSearch had already bought ("no debería existir esa data, lo compra todo", user 2026-10-10). Each
-    buy in VendorSearch/log.tsv ("<unix>\tbuy\t<item>\t<count>\t<copper>...") after an auction's scan removes one
-    auction of that item, count and buyout. (realm, item_id, suffix_id, count, bid, buyout, unit, time_left, owner, seen)"""
-    try:
-        buys = []
-        for line in open(VS_LOG):
-            f = line.rstrip("\n").split("\t")
-            if len(f) >= 5 and f[1] == "buy":
-                buys.append((int(f[0]), int(f[2]), int(f[3]), int(f[4])))
-    except (OSError, ValueError):
-        return rows
-    left = list(rows)
-    gone = 0
-    for t, item, count, copper in buys:
-        for k, r in enumerate(left):
-            if r[1] == item and r[3] == count and r[5] == copper and r[9] < t:
-                del left[k]; gone += 1
-                break
-    if gone:
-        print(f"auctions: {gone} bought by VendorSearch after their scan, left out")
-    return left
-
-
 def write(con, out, name, sql, sort):
     cols = COLUMNS[name]
     rows = con.execute(sql).fetchall()
-    if name == "auctions":
-        rows = drop_bought(rows)
     table = pa.table({c: pa.array([r[i] for r in rows], t) for i, (c, t) in enumerate(cols)})
     pq.write_table(table.sort_by(sort), os.path.join(out, name + ".parquet.tmp"), compression="zstd")
     os.replace(os.path.join(out, name + ".parquet.tmp"), os.path.join(out, name + ".parquet"))
