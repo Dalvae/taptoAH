@@ -9,7 +9,9 @@
   history.parquet   realm, item_id, day, market_value, min_buyout, quantity, scans, source
                     one row per item and day; source 'scan' (our scans) wins over 'tsm'
   latest.parquet    realm, item_id, seen, market_value, min_buyout, quantity, auctions,
-                    mv_3d, mv_14d (averages of daily market value), source
+                    mv_3d, mv_14d (averages of daily market value), source,
+                    sellers_7d (distinct known sellers in our scans of the last 7 days), seen_share_7d
+                    (share of those scans that listed it): a market, or one or two people asking anything
   auctions.parquet  realm, item_id, suffix_id, count, bid, buyout, unit_buyout, time_left, owner, seen
                     what is on the AH now: for each item, the auctions of the newest scan that covered it
                     (owner = seller, published on purpose)
@@ -55,7 +57,8 @@ COLUMNS = {
               ("icon", pa.string())],
     "latest": [("realm", pa.string()), ("item_id", pa.int32()), ("seen", pa.int64()),
                ("market_value", pa.int64()), ("min_buyout", pa.int64()), ("quantity", pa.int32()),
-               ("auctions", pa.int32()), ("mv_3d", pa.int64()), ("mv_14d", pa.int64()), ("source", pa.string())],
+               ("auctions", pa.int32()), ("mv_3d", pa.int64()), ("mv_14d", pa.int64()), ("source", pa.string()),
+               ("sellers_7d", pa.int16()), ("seen_share_7d", pa.float32())],
     "auctions": [("realm", pa.string()), ("item_id", pa.int32()), ("suffix_id", pa.int32()), ("count", pa.int16()),
                  ("bid", pa.int64()), ("buyout", pa.int64()), ("unit_buyout", pa.int64()),
                  ("time_left", pa.int8()), ("owner", pa.string()), ("seen", pa.int64())],
@@ -64,9 +67,39 @@ COLUMNS = {
 }
 
 
+VS_LOG = "/mnt/capital/games/CopilotBuddy/Settings/VendorSearch/log.tsv"
+
+
+def drop_bought(rows):
+    """auctions.parquet keeps the newest scan's auctions until the next scan, so the page's vendor flip listed what
+    Dinarzad's VendorSearch had already bought ("no debería existir esa data, lo compra todo", user 2026-10-10). Each
+    buy in VendorSearch/log.tsv ("<unix>\tbuy\t<item>\t<count>\t<copper>...") after an auction's scan removes one
+    auction of that item, count and buyout. (realm, item_id, suffix_id, count, bid, buyout, unit, time_left, owner, seen)"""
+    try:
+        buys = []
+        for line in open(VS_LOG):
+            f = line.rstrip("\n").split("\t")
+            if len(f) >= 5 and f[1] == "buy":
+                buys.append((int(f[0]), int(f[2]), int(f[3]), int(f[4])))
+    except (OSError, ValueError):
+        return rows
+    left = list(rows)
+    gone = 0
+    for t, item, count, copper in buys:
+        for k, r in enumerate(left):
+            if r[1] == item and r[3] == count and r[5] == copper and r[9] < t:
+                del left[k]; gone += 1
+                break
+    if gone:
+        print(f"auctions: {gone} bought by VendorSearch after their scan, left out")
+    return left
+
+
 def write(con, out, name, sql, sort):
     cols = COLUMNS[name]
     rows = con.execute(sql).fetchall()
+    if name == "auctions":
+        rows = drop_bought(rows)
     table = pa.table({c: pa.array([r[i] for r in rows], t) for i, (c, t) in enumerate(cols)})
     pq.write_table(table.sort_by(sort), os.path.join(out, name + ".parquet.tmp"), compression="zstd")
     os.replace(os.path.join(out, name + ".parquet.tmp"), os.path.join(out, name + ".parquet"))
@@ -82,7 +115,7 @@ def main(out):
 
     today = int(time.time()) // 86400
     latest_sql = f"""
-    WITH newest AS (SELECT realm, MAX(scan_id) AS scan_id FROM scans GROUP BY realm),
+    WITH newest AS (SELECT realm, MAX(scan_id) AS scan_id FROM scans WHERE mode IN ('full', 'capped') GROUP BY realm),
     own AS (
       SELECT n.realm, st.item_id, s.scan_time AS seen, st.market_value, st.min_buyout, st.quantity, st.auctions
       FROM newest n JOIN scans s USING (scan_id) JOIN item_stats st USING (scan_id)),
@@ -95,9 +128,15 @@ def main(out):
         WHERE h.realm = c.realm AND h.item_id = c.item_id AND h.day > {today} - 3),
       (SELECT CAST(AVG(h.market_value) AS INTEGER) FROM history h
         WHERE h.realm = c.realm AND h.item_id = c.item_id AND h.day > {today} - 14),
-      c.source
-    FROM cur c"""
+      c.source, m.sellers, m.share
+    FROM cur c LEFT JOIN market m ON m.realm = c.realm AND m.item_id = c.item_id"""
     con.execute("CREATE INDEX temp.h_item ON history (realm, item_id, day)")
+    con.execute(f"""CREATE TEMP TABLE market AS
+      WITH recent AS (SELECT scan_id, realm FROM scans WHERE mode IN ('full', 'capped') AND scan_time > {int(time.time()) - 7 * 86400}),
+      n AS (SELECT realm, COUNT(*) AS scans FROM recent GROUP BY realm)
+      SELECT r.realm, a.item_id, COUNT(DISTINCT CASE WHEN a.owner IS NOT NULL AND a.owner <> '?' THEN a.owner END) AS sellers,
+             CAST(COUNT(DISTINCT a.scan_id) AS REAL) / n.scans AS share
+      FROM recent r JOIN auctions a USING (scan_id) JOIN n USING (realm) GROUP BY r.realm, a.item_id""")
     write(con, out, "latest", latest_sql, [("realm", "ascending"), ("item_id", "ascending")])
 
     write(con, out, "auctions", """
@@ -114,9 +153,10 @@ def main(out):
       WITH seen AS (SELECT item_id FROM history UNION SELECT item_id FROM latest_ids)
       SELECT s.item_id, COALESCE(i.name, it.name), COALESCE(i.quality, it.quality), i.class, i.subclass,
              COALESCE(i.item_level, it.level), i.required_level, i.inventory_type, i.sell_price, i.stackable,
-             NULLIF(COALESCE(it.icon, ic.icon), '')
+             CASE WHEN ci.icon IS NOT NULL THEN 'local:' || ci.icon ELSE NULLIF(COALESCE(NULLIF(it.icon, 'inv_misc_questionmark'), NULLIF(ic.icon, ''), it.icon), '') END
       FROM seen s LEFT JOIN item_info i USING (item_id) LEFT JOIN items it USING (item_id)
-      LEFT JOIN item_icons ic USING (item_id)"""
+      LEFT JOIN item_icons ic USING (item_id)
+      LEFT JOIN client_icons ci ON ci.icon = COALESCE(NULLIF(it.icon, 'inv_misc_questionmark'), NULLIF(ic.icon, ''), it.icon)"""
           .replace("latest_ids", "(SELECT item_id FROM tsm_latest UNION SELECT item_id FROM item_stats)"),
           [("item_id", "ascending")])
 
